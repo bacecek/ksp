@@ -26,6 +26,7 @@ import com.google.devtools.ksp.symbol.KSFile
 import com.google.devtools.ksp.symbol.KSFunctionDeclaration
 import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.visitor.KSDefaultVisitor
+import com.intellij.psi.PsiCompiledElement
 import com.intellij.psi.PsiImportStatement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiPackage
@@ -507,6 +508,33 @@ abstract class IncrementalContextBase(
     }
 
     /**
+     * Returns the path under which lookups performed in [psiFile] have to be recorded.
+     *
+     * Dirtiness is only propagated over paths that [DirtinessPropagator] understands: files that KSP processes and
+     * synthetic [NoSourceFile]s. Declarations from the compilation classpath have no source file; their PSI is backed
+     * by a class file, whose path (e.g. `<path>/classes.jar!/com/example/Foo.class`) is not a key in any of the caches
+     * and therefore silently stops propagation. Represent those by the very [NoSourceFile] that [calcDirtyFiles]
+     * derives from [changedClasses], so that dependencies between classpath declarations remain traversable.
+     */
+    private fun lookupOwnerPathOf(psiFile: PsiJavaFile): String =
+        psiFile.noSourceFile()?.filePath ?: psiFile.virtualFile.path
+
+    /**
+     * Returns the [NoSourceFile] standing for [this] if it is a class file, or null if it is a source file.
+     *
+     * Note that nested classes have their own class file on disk, but IntelliJ exposes them through the PSI file of
+     * their outermost class. Lookups from a nested class are therefore attributed to that outermost class: an
+     * approximation, but one that still propagates, unlike the class file path it replaces.
+     */
+    private fun PsiJavaFile.noSourceFile(): NoSourceFile? {
+        if (this !is PsiCompiledElement) {
+            return null
+        }
+        val fqn = classes.firstOrNull()?.qualifiedName ?: return null
+        return NoSourceFile(baseDir, fqn)
+    }
+
+    /**
      * Insert Java file -> names lookup records.
      * In other words, it inserts the names of symbols that may invalidate the [psiFile].
      * There are several cases where that may happen:
@@ -520,7 +548,7 @@ abstract class IncrementalContextBase(
         if (!isIncremental)
             return
 
-        val path = psiFile.virtualFile.path
+        val path = lookupOwnerPathOf(psiFile)
         val (scope, name) = separateQualifierAndName(fqn)
 
         // Java types are classes. Therefore lookups only happen in packages.
