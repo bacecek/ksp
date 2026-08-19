@@ -35,8 +35,10 @@ import com.google.devtools.ksp.impl.symbol.kotlin.separateQualifierAndName
 import com.google.devtools.ksp.impl.symbol.kotlin.typeArguments
 import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSDeclaration
+import com.google.devtools.ksp.symbol.KSFile
 import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.symbol.Origin
+import com.intellij.psi.PsiCompiledElement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.util.containers.MultiMap
 import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
@@ -226,21 +228,44 @@ class IncrementalContextAA(
      * If the filepath is already available, it is returned. Otherwise, a synthetic filepath is generated.
      */
     private fun filePathFor(declaration: KSDeclaration): String {
-        // Try directly getting the filepath
-        val maybeAvailableFilePath = declaration.containingFile?.filePath
+        // Try directly getting the filepath.
+        // Declarations from the compilation classpath do report a containing file, namely the class file they were
+        // loaded from. Its path cannot be propagated over, see IncrementalContextBase.lookupOwnerPathOf, so those
+        // fall through to the synthetic filepath below.
+        val maybeAvailableFilePath = declaration.containingFile?.takeIf { it.hasSource() }?.filePath
         if (maybeAvailableFilePath != null) {
             return maybeAvailableFilePath
         }
 
-        // Construct synthetic filepath
-        val parentDeclarationName = declaration.qualifiedName?.asString()
+        // Construct synthetic filepath.
+        // Classpath changes are reported per class, see IncrementalContextBase.calcDirtyFiles, so a member has to be
+        // represented by the class declaring it; otherwise nothing ever reaches it while propagating dirtiness.
+        val owner = declaration.closestEnclosingClassOrSelf()
+        val ownerName = owner.qualifiedName?.asString()
             ?: buildString {
-                append(declaration.packageName.asString())
+                append(owner.packageName.asString())
                 append('.')
-                append(declaration.simpleName.asString())
+                append(owner.simpleName.asString())
             }
 
-        return NoSourceFile(baseDir, parentDeclarationName).filePath
+        return NoSourceFile(baseDir, ownerName).filePath
+    }
+
+    /**
+     * Returns whether [this] is a real source file, as opposed to the class file a classpath declaration was loaded
+     * from. Only Java classpath declarations report such a file; Kotlin ones report no containing file at all.
+     */
+    private fun KSFile.hasSource(): Boolean = (this as? KSFileJavaImpl)?.psi !is PsiCompiledElement
+
+    /**
+     * Returns the closest [KSClassDeclaration] enclosing [this], or [this] itself when it is not declared in a class.
+     */
+    private fun KSDeclaration.closestEnclosingClassOrSelf(): KSDeclaration {
+        var current: KSDeclaration = this
+        while (current !is KSClassDeclaration) {
+            current = current.parentDeclaration ?: return this
+        }
+        return current
     }
 
     @OptIn(KaExperimentalApi::class)
